@@ -1329,6 +1329,152 @@ def get_market_data(
 
 
 # ---------------------------------------------------------------------------
+# Chanlun (chan-kit / NICHANGLIN/czsc) tools
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool
+def chan_chart(
+    symbol: str,
+    market: str = "",
+    period: str = "day",
+    limit: int = 300,
+    include_raw: bool = False,
+) -> str:
+    """Fetch Chanlun structure from chan-kit (NICHANGLIN/czsc): fx/bi/zs and B1–B3/S1–S3.
+
+    Prefer this over the bundled waditu-czsc chanlun skill for A-share charts
+    that match the Chanlun Web product. Requires CHAN_API_BASE_URL and usually
+    CHAN_SERVICE_TOKEN.
+    """
+    registry = _get_registry()
+    params: dict[str, Any] = {
+        "symbol": symbol,
+        "period": period,
+        "limit": limit,
+        "include_raw": include_raw,
+    }
+    if market:
+        params["market"] = market
+    return registry.execute("chan_chart", params)
+
+
+@mcp.tool
+def chan_backtest(
+    symbol: str,
+    start_date: str,
+    end_date: str,
+    period: str = "day",
+    kinds: list[str] | None = None,
+    limit: int = 800,
+    source: str = "auto",
+    run_only_prepare: bool = False,
+) -> str:
+    """Backtest Chanlun buy/sell points from chan-kit trades[] via SignalEngine."""
+    registry = _get_registry()
+    params: dict[str, Any] = {
+        "symbol": symbol,
+        "start_date": start_date,
+        "end_date": end_date,
+        "period": period,
+        "limit": limit,
+        "source": source,
+        "run_only_prepare": run_only_prepare,
+    }
+    if kinds:
+        params["kinds"] = kinds
+    return registry.execute("chan_backtest", params)
+
+
+@mcp.tool
+def chan_scan(
+    symbols: list[str] | None = None,
+    period: str = "day",
+    kinds: list[str] | None = None,
+    lookback_bars: int = 5,
+    limit: int = 300,
+) -> str:
+    """Scan A-share symbols for recent Chanlun B1–B3/S1–S3 signals via chan-kit."""
+    registry = _get_registry()
+    params: dict[str, Any] = {
+        "period": period,
+        "lookback_bars": lookback_bars,
+        "limit": limit,
+    }
+    if symbols:
+        params["symbols"] = symbols
+    if kinds:
+        params["kinds"] = kinds
+    return registry.execute("chan_scan", params)
+
+
+@mcp.tool
+def chan_event_study(
+    symbol: str,
+    period: str = "day",
+    kinds: list[str] | None = None,
+    horizons: list[int] | None = None,
+    limit: int = 800,
+) -> str:
+    """Forward-return event study around Chanlun signal timestamps."""
+    registry = _get_registry()
+    params: dict[str, Any] = {"symbol": symbol, "period": period, "limit": limit}
+    if kinds:
+        params["kinds"] = kinds
+    if horizons:
+        params["horizons"] = horizons
+    return registry.execute("chan_event_study", params)
+
+
+@mcp.tool
+def chan_shadow_align(
+    symbol: str,
+    trades: list[dict[str, Any]] | None = None,
+    trades_json: str = "",
+    period: str = "day",
+    window_seconds: int | None = None,
+    limit: int = 800,
+) -> str:
+    """Align user/Shadow Account trades to nearby Chanlun signal points."""
+    registry = _get_registry()
+    params: dict[str, Any] = {"symbol": symbol, "period": period, "limit": limit}
+    if trades is not None:
+        params["trades"] = trades
+    if trades_json:
+        params["trades_json"] = trades_json
+    if window_seconds is not None:
+        params["window_seconds"] = window_seconds
+    return registry.execute("chan_shadow_align", params)
+
+
+@mcp.tool
+def chan_schedule_scan(
+    schedule: str,
+    symbols: list[str],
+    period: str = "day",
+    kinds: list[str] | None = None,
+    lookback_bars: int = 5,
+    prompt: str = "",
+    job_id: str = "",
+) -> str:
+    """Create a scheduled research job that periodically runs chan_scan."""
+    registry = _get_registry()
+    params: dict[str, Any] = {
+        "schedule": schedule,
+        "symbols": symbols,
+        "period": period,
+        "lookback_bars": lookback_bars,
+    }
+    if kinds:
+        params["kinds"] = kinds
+    if prompt:
+        params["prompt"] = prompt
+    if job_id:
+        params["job_id"] = job_id
+    return registry.execute("chan_schedule_scan", params)
+
+
+# ---------------------------------------------------------------------------
 # Read-only fundamentals, flow, news & discovery tools
 #
 # Each wrapper delegates to the auto-discovered local registry, exactly like

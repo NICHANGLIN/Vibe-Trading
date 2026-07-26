@@ -100,6 +100,8 @@ class TestEnvConfigDefaults:
         assert c.data.longbridge_app_key == ""
         assert c.data.longbridge_app_secret == ""
         assert c.data.longbridge_access_token == ""
+        assert c.data.chan_api_base_url == "http://127.0.0.1:8000"
+        assert c.data.chan_service_token == ""
 
     def test_api_defaults(self) -> None:
         c = EnvConfig()

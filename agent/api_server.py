@@ -28,6 +28,11 @@ for _s in ("stdout", "stderr"):
     if callable(_r):
         _r(encoding="utf-8", errors="replace")
 
+# When launched as ``python -m api_server``, the module is registered as
+# ``__main__`` only. Route modules look up ``sys.modules["api_server"]``,
+# so alias this module under that name before route registration below.
+_sys.modules.setdefault("api_server", _sys.modules[__name__])
+
 # ---------------------------------------------------------------------------
 # Extracted infrastructure — re-exported for route-module and test access
 # ---------------------------------------------------------------------------
@@ -126,7 +131,19 @@ from src.api.scheduled_routes import (  # noqa: E402
 
 async def _run_startup_preflight() -> None:
     """Run preflight checks on server startup."""
-    from src.preflight import run_preflight
+    from src.config.accessor import get_env_config, reset_env_config
+
+    # Reload env so systemd EnvironmentFile values are visible.
+    reset_env_config()
+    cfg = get_env_config()
+
+    # Headless/systemd installs often hang on yfinance/OKX probes; allow skip.
+    if cfg.api.vibe_skip_preflight:
+        console.print("[dim]Preflight skipped (VIBE_SKIP_PREFLIGHT)[/dim]")
+    else:
+        from src.preflight import run_preflight
+
+        run_preflight(console)
 
     from src.config import migrate as _migrate
 
@@ -134,11 +151,10 @@ async def _run_startup_preflight() -> None:
         _migrate.migrate_legacy_state()  # one-time pre-#904 state move; must never block startup
     except Exception:  # pragma: no cover — best-effort
         logging.getLogger(__name__).warning("Legacy state migration failed", exc_info=True)
-    run_preflight(console)
-    _start_scheduled_research_executor()
-    from src.config.accessor import get_env_config
 
-    if get_env_config().agent_tuning.vibe_trading_channels_auto_start:
+    _start_scheduled_research_executor()
+
+    if cfg.agent_tuning.vibe_trading_channels_auto_start:
         await _start_channel_runtime()
 
 

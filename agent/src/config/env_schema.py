@@ -151,7 +151,8 @@ class DataConfig(_EnvBase):
     """Market-data source credentials and tuning.
 
     Sources: ``backtest/loaders/*.py``, ``src/tools/web_search_tool.py``,
-    ``src/tools/iwencai_tool.py``, ``src/tools/fred_macro_tool.py``.
+    ``src/tools/iwencai_tool.py``, ``src/tools/fred_macro_tool.py``,
+    ``src/tools/chan_client.py``.
     """
 
     tushare_token: str = Field(alias="TUSHARE_TOKEN", default="")
@@ -178,6 +179,11 @@ class DataConfig(_EnvBase):
     longbridge_app_key: str = Field(alias="LONGBRIDGE_APP_KEY", default="")
     longbridge_app_secret: str = Field(alias="LONGBRIDGE_APP_SECRET", default="")
     longbridge_access_token: str = Field(alias="LONGBRIDGE_ACCESS_TOKEN", default="")
+    # chan-kit (NICHANGLIN/czsc) microservice — used by chan_* tools
+    chan_api_base_url: str = Field(
+        alias="CHAN_API_BASE_URL", default="http://127.0.0.1:8000"
+    )
+    chan_service_token: str = Field(alias="CHAN_SERVICE_TOKEN", default="")
 
 
 # ---------------------------------------------------------------------------
@@ -254,6 +260,9 @@ class APIConfig(_EnvBase):
     )
     vibe_trading_enable_shell_tools: EnvBool = Field(
         alias="VIBE_TRADING_ENABLE_SHELL_TOOLS", default=False,
+    )
+    vibe_skip_preflight: EnvBool = Field(
+        alias="VIBE_SKIP_PREFLIGHT", default=False,
     )
     vibe_trading_allowed_file_roots: str = Field(
         alias="VIBE_TRADING_ALLOWED_FILE_ROOTS", default="",

@@ -13,6 +13,8 @@ Mootdx talks the native 通达信 (TDX) binary protocol over TCP, bypassing the 
 
 > Mootdx pins `httpx<0.26` in `setup.py`, but only uses basic `httpx.Client/get` APIs that are forward-compatible. The second `pip install` restores the modern httpx that the rest of Vibe-Trading (MCP server, fastmcp) needs.
 
+可选适配器脚本：[`references/a_mootdx_fetcher.py`](references/a_mootdx_fetcher.py)（自旧路径 `agent/skills/ashare-mootdx/` 迁入）。
+
 ## Quick Start
 
 ```python
