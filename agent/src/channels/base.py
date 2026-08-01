@@ -188,7 +188,12 @@ class BaseChannel(ABC):
     ) -> None:
         """Handle an incoming message: check permissions, issue pairing codes in DMs, or forward to bus."""
         if not self.is_allowed(sender_id):
-            if is_dm:
+            # Allow unapproved senders to redeem invite codes via /join.
+            from src.channels.pairing.store import is_join_command
+
+            if is_join_command(content):
+                pass
+            elif is_dm:
                 code = generate_code(self.name, str(sender_id))
                 await self.send(
                     OutboundMessage(
@@ -202,13 +207,14 @@ class BaseChannel(ABC):
                     "Sent pairing code %s to sender %s in chat %s",
                     code, sender_id, chat_id,
                 )
+                return
             else:
                 logger.warning(
                     "Access denied for sender %s. "
                     "Add them to allow_from list in config to grant access.",
                     sender_id,
                 )
-            return
+                return
 
         meta = metadata or {}
         if self.supports_streaming:

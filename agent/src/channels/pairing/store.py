@@ -27,6 +27,9 @@ _LOCK = threading.Lock()
 _ALPHABET = string.ascii_uppercase + string.digits
 _CODE_LENGTH = 8  # e.g. ABCD-EFGH
 _TTL_DEFAULT_S = 600  # 10 minutes
+_INVITE_TTL_DEFAULT_S = 1800  # 30 minutes
+_INVITE_MAX_USES_DEFAULT = 1
+INVITE_PAYLOAD_PREFIX = "VIBE-WEIXIN-INVITE:"
 
 
 def _store_path() -> Path:
@@ -40,20 +43,25 @@ def _write_text_atomic(path: Path, text: str) -> None:
     tmp.replace(path)
 
 
+def _empty_store() -> dict[str, Any]:
+    return {"approved": {}, "pending": {}, "invites": {}}
+
+
 def _load() -> dict[str, Any]:
     path = _store_path()
     try:
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
     except FileNotFoundError:
-        return {"approved": {}, "pending": {}}
+        return _empty_store()
     except (json.JSONDecodeError, OSError):
         logger.warning("Corrupted pairing store, resetting")
-        return {"approved": {}, "pending": {}}
+        return _empty_store()
 
     # Convert approved lists to str sets for O(1) lookup.
     for channel, users in data.get("approved", {}).items():
         data["approved"][channel] = {str(u) for u in users}
+    data.setdefault("invites", {})
     return data
 
 
@@ -64,6 +72,7 @@ def _save(data: dict[str, Any]) -> None:
     payload = {
         "approved": {ch: sorted(list(users)) for ch, users in data.get("approved", {}).items()},
         "pending": dict(data.get("pending", {})),
+        "invites": dict(data.get("invites", {})),
     }
     _write_text_atomic(path, json.dumps(payload, indent=2, ensure_ascii=False))
 
@@ -75,6 +84,158 @@ def _gc_pending(data: dict[str, Any]) -> None:
     expired = [code for code, info in pending.items() if info.get("expires_at", 0) < now]
     for code in expired:
         del pending[code]
+
+
+def _gc_invites(data: dict[str, Any]) -> None:
+    """Remove expired invite entries in-place.
+
+    Exhausted-but-unexpired invites are kept so redeem can report ``exhausted``
+    distinctly from ``invalid``.
+    """
+    now = time.time()
+    invites: dict[str, Any] = data.get("invites", {})
+    expired = [code for code, info in invites.items() if info.get("expires_at", 0) < now]
+    for code in expired:
+        del invites[code]
+
+
+def _new_code() -> str:
+    raw = "".join(secrets.choice(_ALPHABET) for _ in range(_CODE_LENGTH))
+    return f"{raw[:4]}-{raw[4:]}"
+
+
+def normalize_invite_code(raw: str) -> str:
+    """Normalize user-provided invite codes (strip payload prefix / whitespace)."""
+    text = (raw or "").strip()
+    if text.upper().startswith(INVITE_PAYLOAD_PREFIX):
+        text = text[len(INVITE_PAYLOAD_PREFIX) :]
+    text = text.strip().strip("`").strip()
+    return text.upper()
+
+
+def is_join_command(content: str) -> bool:
+    """Return True when *content* is a ``/join`` slash command."""
+    stripped = (content or "").strip().lower()
+    return stripped == "/join" or stripped.startswith("/join ")
+
+
+def parse_join_code(content: str) -> str | None:
+    """Extract the invite code argument from a ``/join`` command, if present."""
+    parts = (content or "").strip().split(None, 1)
+    if not parts or parts[0].lower() != "/join":
+        return None
+    if len(parts) < 2:
+        return None
+    code = normalize_invite_code(parts[1])
+    return code or None
+
+
+def create_invite(
+    channel: str,
+    created_by: str,
+    *,
+    ttl: int = _INVITE_TTL_DEFAULT_S,
+    max_uses: int = _INVITE_MAX_USES_DEFAULT,
+) -> dict[str, Any]:
+    """Create a channel invite token that can be redeemed via ``/join``.
+
+    Returns:
+        Dict with ``code``, ``channel``, ``created_by``, ``created_at``,
+        ``expires_at``, ``max_uses``, ``uses``, and ``payload``.
+    """
+    with _LOCK:
+        data = _load()
+        _gc_pending(data)
+        _gc_invites(data)
+        code = _new_code()
+        now = time.time()
+        info = {
+            "channel": channel,
+            "created_by": str(created_by),
+            "created_at": now,
+            "expires_at": now + max(int(ttl), 1),
+            "max_uses": max(int(max_uses), 1),
+            "uses": 0,
+        }
+        data.setdefault("invites", {})[code] = info
+        _save(data)
+        logger.info(
+            "Created invite %s for %s by %s (ttl=%ss, max_uses=%s)",
+            code,
+            channel,
+            created_by,
+            ttl,
+            max_uses,
+        )
+        return {
+            **info,
+            "code": code,
+            "payload": f"{INVITE_PAYLOAD_PREFIX}{code}",
+        }
+
+
+def redeem_invite(channel: str, code: str, sender_id: str) -> tuple[bool, str]:
+    """Redeem an invite for *sender_id* on *channel*.
+
+    Returns:
+        ``(True, detail)`` on success, ``(False, reason)`` on failure.
+        On success the sender is added to the channel's approved list.
+    """
+    normalized = normalize_invite_code(code)
+    if not normalized:
+        return False, "missing_code"
+
+    with _LOCK:
+        data = _load()
+        _gc_pending(data)
+        # Do not GC exhausted-but-unexpired invites before lookup.
+        invites: dict[str, Any] = data.setdefault("invites", {})
+        info = invites.get(normalized)
+        if info is None:
+            # Also try case-sensitive key for older stores, then fail.
+            info = invites.get(code.strip())
+            if info is None:
+                return False, "invalid"
+            normalized = code.strip()
+
+        if info.get("channel") != channel:
+            return False, "wrong_channel"
+
+        now = time.time()
+        if float(info.get("expires_at", 0)) < now:
+            invites.pop(normalized, None)
+            _save(data)
+            return False, "expired"
+
+        max_uses = int(info.get("max_uses", _INVITE_MAX_USES_DEFAULT))
+        uses = int(info.get("uses", 0))
+        if uses >= max_uses:
+            return False, "exhausted"
+
+        sid = str(sender_id)
+        approved = data.setdefault("approved", {}).setdefault(channel, set())
+        already = sid in approved
+        approved.add(sid)
+        info["uses"] = uses + 1
+        if info["uses"] >= max_uses:
+            # Keep until expiry so a second redeem reports exhausted, not invalid.
+            pass
+        _save(data)
+        logger.info(
+            "Redeemed invite %s for %s@%s (uses=%s/%s, already=%s)",
+            normalized,
+            sid,
+            channel,
+            info["uses"],
+            max_uses,
+            already,
+        )
+        return True, "already_approved" if already else "approved"
+
+
+def format_invite_payload(code: str) -> str:
+    """Return the QR payload string for an invite code."""
+    return f"{INVITE_PAYLOAD_PREFIX}{normalize_invite_code(code)}"
 
 
 def generate_code(
@@ -89,8 +250,7 @@ def generate_code(
     with _LOCK:
         data = _load()
         _gc_pending(data)
-        raw = "".join(secrets.choice(_ALPHABET) for _ in range(_CODE_LENGTH))
-        code = f"{raw[:4]}-{raw[4:]}"
+        code = _new_code()
 
         data.setdefault("pending", {})[code] = {
             "channel": channel,

@@ -15,12 +15,29 @@ from typing import Any
 from src.channels.bus.events import InboundMessage, OutboundMessage
 from src.channels.bus.queue import MessageBus
 from src.channels.manager import ChannelManager
-from src.channels.pairing import PAIRING_COMMAND_META_KEY, handle_pairing_command
+from src.channels.pairing import (
+    INVITE_COMMAND_META_KEY,
+    JOIN_COMMAND_META_KEY,
+    PAIRING_COMMAND_META_KEY,
+    handle_pairing_command,
+    is_approved,
+    is_join_command,
+    parse_join_code,
+    redeem_invite,
+)
 from src.config.paths import get_data_dir
 from src.session.models import Message, Session
 from src.session.service import SessionBusyError
 
 logger = logging.getLogger(__name__)
+
+_JOIN_ERROR_MESSAGES = {
+    "missing_code": "Usage: `/join <CODE>`\nScan the invite QR, then send the code here.",
+    "invalid": "Invalid invite code. Ask the owner to send a fresh `/invite` QR.",
+    "expired": "This invite code has expired. Ask the owner to send a fresh `/invite` QR.",
+    "exhausted": "This invite code has already been used. Ask the owner for a new `/invite`.",
+    "wrong_channel": "This invite code is not valid on this channel.",
+}
 
 
 @dataclass
@@ -120,6 +137,14 @@ class ChannelRuntime:
 
     async def _handle_inbound(self, msg: InboundMessage) -> None:
         try:
+            if self._is_invite_command(msg.content):
+                await self._handle_invite_command(msg)
+                return
+
+            if is_join_command(msg.content):
+                await self._handle_join_command(msg)
+                return
+
             if self._is_pairing_command(msg.content):
                 is_operator, is_global = self._resolve_operator(msg.channel, msg.sender_id)
                 if not is_operator:
@@ -302,6 +327,142 @@ class ChannelRuntime:
         is_channel = sid in self._channel_operators.get(channel, set())
         return (is_global or is_channel, is_global)
 
+    def _can_invite(self, channel: str, sender_id: str | None) -> bool:
+        """Return True if *sender_id* may create invite QR codes on *channel*."""
+        is_operator, _ = self._resolve_operator(channel, sender_id)
+        if is_operator:
+            return True
+        sid = str(sender_id)
+        if is_approved(channel, sid):
+            return True
+        allow_from = self._channel_allow_from(channel)
+        return "*" in allow_from or sid in allow_from
+
+    def _channel_allow_from(self, channel: str) -> list[str]:
+        """Read allow_from for *channel* from the loaded ChannelManager config."""
+        if self.manager is None:
+            return []
+        section = None
+        if isinstance(self.manager.config, dict):
+            section = self.manager.config.get(channel)
+        else:
+            section = getattr(self.manager.config, channel, None)
+        if isinstance(section, Mapping):
+            raw = section.get("allow_from") or section.get("allowFrom") or []
+        else:
+            raw = getattr(section, "allow_from", None) or []
+        return [str(x) for x in raw]
+
+    def _channel_invite_settings(self, channel: str) -> tuple[int, int]:
+        """Return ``(ttl_s, max_uses)`` for invite creation on *channel*."""
+        ttl_s = 1800
+        max_uses = 1
+        if self.manager is None:
+            return ttl_s, max_uses
+        section = None
+        if isinstance(self.manager.config, dict):
+            section = self.manager.config.get(channel)
+        else:
+            section = getattr(self.manager.config, channel, None)
+        if isinstance(section, Mapping):
+            ttl_s = int(section.get("invite_ttl_s") or section.get("inviteTtlS") or ttl_s)
+            max_uses = int(section.get("invite_max_uses") or section.get("inviteMaxUses") or max_uses)
+        elif section is not None:
+            ttl_s = int(getattr(section, "invite_ttl_s", ttl_s) or ttl_s)
+            max_uses = int(getattr(section, "invite_max_uses", max_uses) or max_uses)
+        return max(ttl_s, 1), max(max_uses, 1)
+
+    async def _handle_invite_command(self, msg: InboundMessage) -> None:
+        """Create an invite QR and send it back to the requester."""
+        if not self._can_invite(msg.channel, msg.sender_id):
+            await self.bus.publish_outbound(
+                OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content=(
+                        "Not authorized: `/invite` is restricted to operators "
+                        "and approved users on this channel."
+                    ),
+                    metadata={INVITE_COMMAND_META_KEY: True, "unauthorized": True},
+                )
+            )
+            return
+
+        if msg.channel != "weixin":
+            await self.bus.publish_outbound(
+                OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content="`/invite` QR delivery is currently supported on WeChat (`weixin`) only.",
+                    metadata={INVITE_COMMAND_META_KEY: True},
+                )
+            )
+            return
+
+        from src.channels.weixin_invite import build_invite_for_weixin
+
+        ttl_s, max_uses = self._channel_invite_settings(msg.channel)
+        invite = build_invite_for_weixin(
+            created_by=str(msg.sender_id),
+            ttl_s=ttl_s,
+            max_uses=max_uses,
+        )
+        await self.bus.publish_outbound(
+            OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=str(invite["caption"]),
+                media=[str(invite["qr_path"])],
+                metadata={
+                    INVITE_COMMAND_META_KEY: True,
+                    "invite_code": invite["code"],
+                },
+            )
+        )
+
+    async def _handle_join_command(self, msg: InboundMessage) -> None:
+        """Redeem an invite code and approve the sender."""
+        code = parse_join_code(msg.content)
+        if not code:
+            await self.bus.publish_outbound(
+                OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content=_JOIN_ERROR_MESSAGES["missing_code"],
+                    metadata={JOIN_COMMAND_META_KEY: True, "error": "missing_code"},
+                )
+            )
+            return
+
+        ok, reason = redeem_invite(msg.channel, code, str(msg.sender_id))
+        if not ok:
+            await self.bus.publish_outbound(
+                OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content=_JOIN_ERROR_MESSAGES.get(reason, f"Invite redeem failed: {reason}"),
+                    metadata={JOIN_COMMAND_META_KEY: True, "error": reason},
+                )
+            )
+            return
+
+        detail = (
+            "You were already approved."
+            if reason == "already_approved"
+            else "Access granted."
+        )
+        await self.bus.publish_outbound(
+            OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=(
+                    f"✅ {detail}\n\n"
+                    "You can chat with ClawBot now. Send `/new` anytime to start a fresh session."
+                ),
+                metadata={JOIN_COMMAND_META_KEY: True, "invite_code": code, "status": reason},
+            )
+        )
+
     @staticmethod
     def operators_from_config(
         config: Mapping[str, Any] | None,
@@ -325,6 +486,10 @@ class ChannelRuntime:
             if isinstance(value, Mapping) and value.get("operators"):
                 channel_ops[str(key)] = {str(o) for o in value["operators"]}
         return global_ops, channel_ops
+
+    @staticmethod
+    def _is_invite_command(content: str) -> bool:
+        return content.strip().lower() == "/invite"
 
     @staticmethod
     def _is_pairing_command(content: str) -> bool:

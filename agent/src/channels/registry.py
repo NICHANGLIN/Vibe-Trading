@@ -19,7 +19,17 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_INTERNAL = frozenset({"base", "bus", "config", "manager", "pairing", "registry", "runtime", "utils"})
+_INTERNAL = frozenset({
+    "base",
+    "bus",
+    "config",
+    "manager",
+    "pairing",
+    "registry",
+    "runtime",
+    "utils",
+    "weixin_invite",
+})
 _LEGACY_GLOBAL_CONFIG_KEYS = frozenset(
     {"restrictToWorkspace", "restrict_to_workspace", "showReasoning", "show_reasoning"}
 )

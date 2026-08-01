@@ -123,12 +123,15 @@ class WeixinConfig(BaseModel):
 
     enabled: bool = False
     allow_from: list[str] = Field(default_factory=list)
+    operators: list[str] = Field(default_factory=list)
     base_url: str = "https://ilinkai.weixin.qq.com"
     cdn_base_url: str = "https://novac2c.cdn.weixin.qq.com/c2c"
     route_tag: str | int | None = None
     token: str = ""  # Manually set token, or obtained via QR login
     state_dir: str = ""  # Default: ~/.vibe-trading/weixin/
     poll_timeout: int = DEFAULT_LONG_POLL_TIMEOUT_S  # seconds for long-poll
+    invite_ttl_s: int = 1800
+    invite_max_uses: int = 1
 
 
 class WeixinChannel(BaseChannel):
@@ -617,7 +620,26 @@ class WeixinChannel(BaseChannel):
             self._processed_ids.popitem(last=False)
 
         ctx_token = msg.get("context_token", "")
+        item_list: list[dict] = msg.get("item_list") or []
+        early_text = self._extract_plain_text(item_list)
+        from src.channels.pairing.store import is_join_command
+
         if not self.is_allowed(from_user_id):
+            # Unapproved guests may redeem invites with /join before allowlist.
+            if is_join_command(early_text):
+                if ctx_token:
+                    self._context_tokens[from_user_id] = ctx_token
+                    self._context_token_at[from_user_id] = time.time()
+                    self._save_state()
+                await self._handle_message(
+                    sender_id=from_user_id,
+                    chat_id=from_user_id,
+                    content=early_text,
+                    metadata={"message_id": msg_id},
+                    is_dm=not from_user_id.endswith("@chatroom"),
+                )
+                return
+
             if from_user_id.endswith("@chatroom"):
                 await self._handle_message(
                     sender_id=from_user_id,
@@ -667,7 +689,6 @@ class WeixinChannel(BaseChannel):
             self._save_state()
 
         # Parse item_list (WeixinMessage.item_list — types.ts:161)
-        item_list: list[dict] = msg.get("item_list") or []
         content_parts: list[str] = []
         media_paths: list[str] = []
         has_top_level_downloadable_media = False
@@ -829,6 +850,18 @@ class WeixinChannel(BaseChannel):
             media=media_paths or None,
             metadata={"message_id": msg_id},
         )
+
+    @staticmethod
+    def _extract_plain_text(item_list: list[dict]) -> str:
+        """Extract concatenated plain-text bodies from a WeChat item_list."""
+        parts: list[str] = []
+        for item in item_list or []:
+            if item.get("type", 0) != ITEM_TEXT:
+                continue
+            text = (item.get("text_item") or {}).get("text", "")
+            if text:
+                parts.append(str(text))
+        return "\n".join(parts).strip()
 
     # ------------------------------------------------------------------
     # Media download  (matches media-download.ts + pic-decrypt.ts)
