@@ -20,10 +20,21 @@ category: strategy
 |------|------|
 | `chan_chart` | 读取分型/笔/中枢/B1–B3/S1–S3 |
 | `chan_backtest` | 将 trades[] 映射为 SignalEngine 并回测 |
-| `chan_scan` | 股票池扫描近期信号 |
+| `chan_scan` | 股票池扫描近期信号（可传 `index=` 自动取成分股） |
+| `get_index_constituents` | **拉取指数成分股**（中证A500/沪深300/中证500 等，免费无需 key） |
 | `chan_event_study` | 信号后 N 根 K 线收益事件研究 |
 | `chan_shadow_align` | 实盘/Shadow 成交与买卖点对齐 |
 | `chan_schedule_scan` | 定时扫描（配合 scheduler + IM） |
+
+### 指数选股（必读）
+
+用户说「从中证A500 / 沪深300 筛选一买」时：
+
+1. **禁止**只用 `search_symbol`——它只能解析指数代码本身，**不会**返回成分股。
+2. **优先一次调用**：`chan_scan(index="中证A500", kinds=["B1"], period="day", max_symbols=500)`（内部并行拉图，勿拆成十几次小批量）。
+3. `chan_scan` 返回的 `matches[]`（含 symbol/name/kind/time/price）就是完整结论依据；**禁止**再对每只股票 `search_symbol` / web_search「核实身份」。
+4. 若用户只要 Top N：直接按 `matches` 排序/挑选后用中文回答，不要重扫。
+5. 扫描约 1–2 分钟；不要中途改用 web_search。
 
 ## 环境变量
 
@@ -38,7 +49,8 @@ CHAN_SERVICE_TOKEN=<与 chan-kit 相同的服务令牌>
 2. `chan_chart(symbol=..., period="day")` 获取结构摘要
 3. 用缠论术语解释最近中枢与买卖点（一/二/三类）
 4. 需要验证时：`chan_backtest` 或 `chan_event_study`
-5. 选股：`chan_scan`；定时：`chan_schedule_scan(schedule="86400000", symbols=[...])`
+5. 指数选股：`chan_scan(index="中证A500", kinds=["B1"], max_symbols=500)`
+6. 定时：`chan_schedule_scan(schedule="86400000", symbols=[...])`
 
 ## 周期映射
 

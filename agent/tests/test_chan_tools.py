@@ -106,7 +106,7 @@ def test_chan_scan_tool_match():
         )
     assert out["status"] == "ok"
     assert out["match_count"] == 1
-    assert out["matches"][0]["latest_hit"]["kind"] == "B2"
+    assert out["matches"][0]["kind"] == "B2"
 
 
 def test_chan_event_study():

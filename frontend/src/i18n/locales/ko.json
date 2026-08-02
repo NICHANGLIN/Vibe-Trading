@@ -1038,6 +1038,7 @@
     "sdm_status": "전략 상태 확인",
     "search_hypotheses": "가설 검색",
     "search_symbol": "종목 코드 검색",
+    "get_index_constituents": "지수 구성종목 조회",
     "session_search": "과거 세션 검색",
     "skill_file": "스킬 파일 읽기",
     "start_research_goal": "리서치 목표 시작",

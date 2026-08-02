@@ -1038,6 +1038,7 @@
     "sdm_status": "Check strategy status",
     "search_hypotheses": "Search hypotheses",
     "search_symbol": "Search symbols",
+    "get_index_constituents": "Fetch index constituents",
     "session_search": "Search past sessions",
     "skill_file": "Read skill file",
     "start_research_goal": "Start research goal",

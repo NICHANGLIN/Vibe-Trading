@@ -89,7 +89,7 @@ CONTEXT_TOKEN_MAX_AGE_S = 60
 MAX_CONSECUTIVE_FAILURES = 3
 BACKOFF_DELAY_S = 30
 RETRY_DELAY_S = 2
-MAX_QR_REFRESH_COUNT = 3
+MAX_QR_REFRESH_COUNT = 10
 TYPING_STATUS_TYPING = 1
 TYPING_STATUS_CANCEL = 2
 TYPING_TICKET_TTL_S = 24 * 60 * 60
@@ -224,8 +224,16 @@ class WeixinChannel(BaseChannel):
     def _save_state(self) -> None:
         state_file = self._get_state_dir() / "account.json"
         with suppress(Exception):
+            # Never persist an empty token over a previously good login.
+            token = self._token
+            if not token and state_file.exists():
+                try:
+                    prev = json.loads(state_file.read_text(encoding="utf-8"))
+                    token = str(prev.get("token") or "") or token
+                except Exception:
+                    pass
             data = {
-                "token": self._token,
+                "token": token,
                 "get_updates_buf": self._get_updates_buf,
                 "context_tokens": self._context_tokens,
                 "typing_tickets": self._typing_tickets,
@@ -350,14 +358,18 @@ class WeixinChannel(BaseChannel):
 
             while self._running:
                 try:
+                    # Protocol expects a minimal ClientVersion header for QR status
+                    # long-poll (see openclaw-weixin / iLink bot docs).
                     status_data = await self._api_get_with_base(
                         base_url=current_poll_base_url,
                         endpoint="ilink/bot/get_qrcode_status",
                         params={"qrcode": qrcode_id},
                         auth=False,
+                        extra_headers={"iLink-App-ClientVersion": "1"},
                     )
                 except Exception as e:
                     if self._is_retryable_qr_poll_error(e):
+                        self.logger.info("QR status poll retryable error: %s", e)
                         await asyncio.sleep(1)
                         continue
                     raise
@@ -378,7 +390,7 @@ class WeixinChannel(BaseChannel):
                             self.config.base_url = base_url
                         self._save_state()
                         self.logger.info(
-                            "login successful! bot_id={} user_id={}",
+                            "login successful! bot_id=%s user_id=%s",
                             bot_id,
                             user_id,
                         )
@@ -399,7 +411,7 @@ class WeixinChannel(BaseChannel):
                     refresh_count += 1
                     if refresh_count > MAX_QR_REFRESH_COUNT:
                         self.logger.warning(
-                            "QR code expired too many times ({}/{}), giving up.",
+                            "QR code expired too many times (%s/%s), giving up.",
                             refresh_count - 1,
                             MAX_QR_REFRESH_COUNT,
                         )
@@ -427,8 +439,16 @@ class WeixinChannel(BaseChannel):
                 return True
         return False
 
-    @staticmethod
-    def _print_qr_code(url: str) -> None:
+    def _print_qr_code(self, url: str) -> None:
+        """Print ASCII QR and persist PNG/URL for remote scan."""
+        # Also keep a copy under ~/.vibe-trading/weixin for ops (not runtime/).
+        legacy_dir = Path.home() / ".vibe-trading" / "weixin"
+        out_dirs = [self._get_state_dir(), legacy_dir]
+        for d in out_dirs:
+            with suppress(Exception):
+                d.mkdir(parents=True, exist_ok=True)
+                (d / "login-url.txt").write_text(url + "\n", encoding="utf-8")
+
         try:
             import qrcode as qr_lib
 
@@ -436,6 +456,15 @@ class WeixinChannel(BaseChannel):
             qr.add_data(url)
             qr.make(fit=True)
             qr.print_ascii(invert=True)
+            img = qr.make_image(fill_color="black", back_color="white")
+            for d in out_dirs:
+                with suppress(Exception):
+                    img.save(d / "login-qr.png")
+            print(
+                "\nWeChat login QR saved to "
+                f"{legacy_dir / 'login-qr.png'} — scan with WeChat within ~1 min.\n"
+                f"URL: {url}\n"
+            )
         except ImportError:
             print(f"\nLogin URL: {url}\n")
 
@@ -454,9 +483,9 @@ class WeixinChannel(BaseChannel):
         if self._token or self._load_state():
             return True
 
-        # Initialize HTTP client for the login flow
+        # QR status is a long-poll; allow up to ~2 minutes per wait.
         self._client = httpx.AsyncClient(
-            timeout=httpx.Timeout(60, connect=30),
+            timeout=httpx.Timeout(120, connect=30),
             follow_redirects=True,
         )
         self._running = True  # Enable polling loop in _qr_login()
@@ -479,10 +508,21 @@ class WeixinChannel(BaseChannel):
         if self.config.token:
             self._token = self.config.token
         elif not self._load_state():
+            # Dedicated longer-timeout client for QR long-poll login.
+            await self._client.aclose()
+            self._client = httpx.AsyncClient(
+                timeout=httpx.Timeout(120, connect=30),
+                follow_redirects=True,
+            )
             if not await self._qr_login():
                 self.logger.error("login failed. Run 'vibe-trading channels login weixin' to authenticate.")
                 self._running = False
                 return
+            await self._client.aclose()
+            self._client = httpx.AsyncClient(
+                timeout=httpx.Timeout(self._next_poll_timeout_s + 10, connect=30),
+                follow_redirects=True,
+            )
 
         self.logger.info("channel starting with long-poll...")
 
@@ -566,7 +606,7 @@ class WeixinChannel(BaseChannel):
                 self._pause_session()
                 remaining = self._session_pause_remaining_s()
                 self.logger.warning(
-                    "session expired (errcode {}). Pausing {} min.",
+                    "session expired (errcode %s). Pausing %s min.",
                     errcode,
                     max((remaining + 59) // 60, 1),
                 )
@@ -652,7 +692,7 @@ class WeixinChannel(BaseChannel):
 
             if not ctx_token:
                 self.logger.warning(
-                    "Access denied for sender {}; cannot send WeChat pairing code without context_token",
+                    "Access denied for sender %s; cannot send WeChat pairing code without context_token",
                     from_user_id,
                 )
                 return
@@ -1035,7 +1075,7 @@ class WeixinChannel(BaseChannel):
         try:
             data = await self._api_post("ilink/bot/getconfig", body)
         except Exception as e:
-            self.logger.warning("WeChat getconfig failed for {}: {}", chat_id, e)
+            self.logger.warning("WeChat getconfig failed for %s: %s", chat_id, e)
             return context_token
 
         if data.get("ret", 0) != 0:
@@ -1218,7 +1258,7 @@ class WeixinChannel(BaseChannel):
                         raise
                     # 4xx client errors are NOT retryable — fall back to text.
                     filename = Path(media_path).name
-                    self.logger.exception("Failed to send media {}", media_path)
+                    self.logger.exception("Failed to send media %s", media_path)
                     await self._send_text(
                         msg.chat_id, f"[Failed to send: {filename}]", ctx_token,
                     )
@@ -1226,7 +1266,7 @@ class WeixinChannel(BaseChannel):
                     # Non-network errors (format, file-not-found, etc.):
                     # notify the user via text fallback.
                     filename = Path(media_path).name
-                    self.logger.exception("Failed to send media {}", media_path)
+                    self.logger.exception("Failed to send media %s", media_path)
                     # Notify user about failure via text
                     await self._send_text(
                         msg.chat_id, f"[Failed to send: {filename}]", ctx_token,
@@ -1276,7 +1316,7 @@ class WeixinChannel(BaseChannel):
                 return
             await self._send_typing(chat_id, ticket, TYPING_STATUS_TYPING)
         except Exception as e:
-            self.logger.debug("typing indicator start failed for {}: {}", chat_id, e)
+            self.logger.debug("typing indicator start failed for %s: %s", chat_id, e)
             return
 
         stop_event = asyncio.Event()
@@ -1315,7 +1355,7 @@ class WeixinChannel(BaseChannel):
         try:
             await self._send_typing(chat_id, ticket, TYPING_STATUS_CANCEL)
         except Exception as e:
-            self.logger.debug("typing clear failed for {}: {}", chat_id, e)
+            self.logger.debug("typing clear failed for %s: %s", chat_id, e)
 
     async def _send_text(
         self,
@@ -1539,7 +1579,7 @@ def _encrypt_aes_ecb(data: bytes, aes_key_b64: str) -> bytes:
     try:
         key = _parse_aes_key(aes_key_b64)
     except Exception as e:
-        logger.warning("Failed to parse AES key for encryption, sending raw: {}", e)
+        logger.warning("Failed to parse AES key for encryption, sending raw: %s", e)
         return data
 
     # PKCS7 padding
@@ -1571,7 +1611,7 @@ def _decrypt_aes_ecb(data: bytes, aes_key_b64: str) -> bytes:
     try:
         key = _parse_aes_key(aes_key_b64)
     except Exception as e:
-        logger.warning("Failed to parse AES key, returning raw data: {}", e)
+        logger.warning("Failed to parse AES key, returning raw data: %s", e)
         return data
 
     decrypted: bytes | None = None

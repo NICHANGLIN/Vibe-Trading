@@ -1038,6 +1038,7 @@
     "sdm_status": "查看策略状态",
     "search_hypotheses": "搜索研究假设",
     "search_symbol": "搜索标的",
+    "get_index_constituents": "获取指数成分股",
     "session_search": "搜索历史会话",
     "skill_file": "读取技能文件",
     "start_research_goal": "开始研究目标",

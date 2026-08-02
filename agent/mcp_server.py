@@ -12,7 +12,8 @@ analysis, market data, fundamentals & capital-flow & news & discovery
 get_block_trades / get_shareholder_count / get_lockup_expiry / get_sector_info /
 get_research_reports / get_stock_news / get_sec_filings /
 get_financial_statements / get_options_chain / get_stock_profile /
-screen_market / search_symbol / get_macro_series / iwencai_search), read-only
+screen_market / search_symbol / get_index_constituents /
+get_macro_series / iwencai_search), read-only
 trading-connector reads, swarm orchestration, trade-journal and shadow-account
 analysis. Every exposed tool is read-only or research-only; no order-placing or
 order-cancelling tool is ever surfaced via MCP.
@@ -1389,23 +1390,56 @@ def chan_backtest(
 @mcp.tool
 def chan_scan(
     symbols: list[str] | None = None,
+    index: str | None = None,
     period: str = "day",
     kinds: list[str] | None = None,
     lookback_bars: int = 5,
-    limit: int = 300,
+    limit: int = 150,
+    max_symbols: int | None = None,
+    workers: int = 8,
 ) -> str:
-    """Scan A-share symbols for recent Chanlun B1–B3/S1–S3 signals via chan-kit."""
+    """Scan A-share symbols for recent Chanlun B1–B3/S1–S3 signals via chan-kit.
+
+    Pass ``symbols`` and/or ``index`` (e.g. ``中证A500`` / ``000510``) to
+    auto-fetch constituents. Prefer one full-index call with ``max_symbols=500``
+    (parallel workers) instead of many small batches.
+    """
     registry = _get_registry()
     params: dict[str, Any] = {
         "period": period,
         "lookback_bars": lookback_bars,
         "limit": limit,
+        "workers": workers,
     }
+    if max_symbols is not None:
+        params["max_symbols"] = max_symbols
     if symbols:
         params["symbols"] = symbols
+    if index:
+        params["index"] = index
     if kinds:
         params["kinds"] = kinds
     return registry.execute("chan_scan", params)
+
+
+@mcp.tool
+def get_index_constituents(
+    index: str,
+    limit: int = 800,
+    include_names: bool = True,
+) -> str:
+    """Fetch Chinese A-share index constituents (CSI / 中证指数, free, no key).
+
+    Use before ``chan_scan`` when the user names an index universe such as
+    中证A500 / 000510, 沪深300 / 000300, 中证500 / 000905. Returns symbols in
+    project form (``000001.SZ``). ``search_symbol`` does **not** return
+    constituents — call this tool instead.
+    """
+    registry = _get_registry()
+    return registry.execute(
+        "get_index_constituents",
+        {"index": index, "limit": limit, "include_names": include_names},
+    )
 
 
 @mcp.tool

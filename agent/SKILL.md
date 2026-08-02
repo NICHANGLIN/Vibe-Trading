@@ -161,6 +161,7 @@ Use `load_skill(name)` to access full methodology docs with code templates.
 | `get_stock_profile` | Valuation, analyst estimates & institutional holdings (US/HK) | None |
 | `screen_market` | Market screener with fundamental/technical filters | None* |
 | `search_symbol` | Symbol / ticker search across markets | None |
+| `get_index_constituents` | A-share index constituents (CSI A500 / CSI 300 / …) | None* |
 | `get_macro_series` | FRED macroeconomic series | FRED_API_KEY |
 | `iwencai_search` | A-share natural-language research search | IWENCAI_KEY |
 | `web_search` | Search the web via DuckDuckGo | None |

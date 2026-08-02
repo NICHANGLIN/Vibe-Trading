@@ -1038,6 +1038,7 @@
     "sdm_status": "戦略の状態を確認",
     "search_hypotheses": "仮説を検索",
     "search_symbol": "シンボルを検索",
+    "get_index_constituents": "指数構成銘柄を取得",
     "session_search": "過去のセッションを検索",
     "skill_file": "スキルファイルを読む",
     "start_research_goal": "リサーチ目標を開始",
