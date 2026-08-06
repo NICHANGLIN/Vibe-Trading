@@ -83,6 +83,24 @@ SESSION_PAUSE_DURATION_S = 60 * 60
 # agent inactivity (openclaw/openclaw#61174). Proactively refresh before
 # sending if the cached token is older than this threshold.
 CONTEXT_TOKEN_MAX_AGE_S = 60
+# Dead tokens cannot be revived by getconfig; queue proactive until inbound.
+PENDING_PROACTIVE_MAX_AGE_S = 36 * 3600
+RECENT_PROACTIVE_TTL_S = 24 * 3600
+
+
+def _is_context_token_error(exc: BaseException) -> bool:
+    """Detect iLink expired-context failures (ret=-2 / prepare failed)."""
+    text = str(exc).lower()
+    return (
+        "prepare failed" in text
+        or "ret=-2" in text
+        or "ret= -2" in text
+        or ("context_token" in text and "expir" in text)
+    )
+
+
+def _content_fingerprint(content: str) -> str:
+    return hashlib.sha256((content or "").encode("utf-8")).hexdigest()[:20]
 
 
 # Retry constants (matching the reference plugin's monitor.ts)
@@ -169,6 +187,10 @@ class WeixinChannel(BaseChannel):
         self._typing_tasks: dict[str, asyncio.Task] = {}
         self._typing_tickets: dict[str, dict[str, Any]] = {}
         self._context_token_at: dict[str, float] = {}
+        # chat_id -> {content, queued_at, source}
+        self._pending_proactive: dict[str, dict[str, Any]] = {}
+        # chat_id -> {fingerprint, sent_at}  (dedupe notify after inbound flush)
+        self._recent_proactive: dict[str, dict[str, Any]] = {}
         self._pending_tool_hints: dict[str, list[str]] = {}
 
     # ------------------------------------------------------------------
@@ -213,6 +235,56 @@ class WeixinChannel(BaseChannel):
                 }
             else:
                 self._typing_tickets = {}
+            token_at = data.get("context_token_at", {})
+            parsed_at: dict[str, float] = {}
+            if isinstance(token_at, dict):
+                for user_id, ts in token_at.items():
+                    key = str(user_id).strip()
+                    if not key:
+                        continue
+                    try:
+                        val = float(ts)
+                    except (TypeError, ValueError):
+                        continue
+                    if val > 0:
+                        parsed_at[key] = val
+            self._context_token_at = parsed_at
+            pending = data.get("pending_proactive", {})
+            self._pending_proactive = {}
+            if isinstance(pending, dict):
+                now = time.time()
+                for user_id, item in pending.items():
+                    key = str(user_id).strip()
+                    if not key or not isinstance(item, dict):
+                        continue
+                    content = str(item.get("content") or "").strip()
+                    try:
+                        queued_at = float(item.get("queued_at") or 0)
+                    except (TypeError, ValueError):
+                        queued_at = 0.0
+                    if not content or (queued_at and now - queued_at > PENDING_PROACTIVE_MAX_AGE_S):
+                        continue
+                    self._pending_proactive[key] = {
+                        "content": content,
+                        "queued_at": queued_at or now,
+                        "source": str(item.get("source") or "channels_notify"),
+                    }
+            recent = data.get("recent_proactive", {})
+            self._recent_proactive = {}
+            if isinstance(recent, dict):
+                now = time.time()
+                for user_id, item in recent.items():
+                    key = str(user_id).strip()
+                    if not key or not isinstance(item, dict):
+                        continue
+                    fp = str(item.get("fingerprint") or "").strip()
+                    try:
+                        sent_at = float(item.get("sent_at") or 0)
+                    except (TypeError, ValueError):
+                        sent_at = 0.0
+                    if not fp or not sent_at or now - sent_at > RECENT_PROACTIVE_TTL_S:
+                        continue
+                    self._recent_proactive[key] = {"fingerprint": fp, "sent_at": sent_at}
             base_url = data.get("base_url", "")
             if base_url:
                 self.config.base_url = base_url
@@ -236,10 +308,74 @@ class WeixinChannel(BaseChannel):
                 "token": token,
                 "get_updates_buf": self._get_updates_buf,
                 "context_tokens": self._context_tokens,
+                "context_token_at": self._context_token_at,
                 "typing_tickets": self._typing_tickets,
+                "pending_proactive": self._pending_proactive,
+                "recent_proactive": self._recent_proactive,
                 "base_url": self.config.base_url,
             }
             state_file.write_text(json.dumps(data, ensure_ascii=False))
+
+    def queue_proactive(
+        self, chat_id: str, content: str, *, source: str = "channels_notify"
+    ) -> None:
+        """Queue a proactive message until a fresh inbound context_token arrives."""
+        chat_id = str(chat_id or "").strip()
+        content = str(content or "").strip()
+        if not chat_id or not content:
+            return
+        self._pending_proactive[chat_id] = {
+            "content": content,
+            "queued_at": time.time(),
+            "source": source,
+        }
+        self._save_state()
+        self.logger.info(
+            "WeChat queued proactive for %s (%d chars); waiting for inbound context_token",
+            chat_id,
+            len(content),
+        )
+
+    def already_sent_proactive(self, chat_id: str, content: str) -> bool:
+        """True if the same proactive content was delivered recently (incl. inbound flush)."""
+        item = self._recent_proactive.get(str(chat_id or "").strip())
+        if not item:
+            return False
+        try:
+            sent_at = float(item.get("sent_at") or 0)
+        except (TypeError, ValueError):
+            return False
+        if not sent_at or time.time() - sent_at > RECENT_PROACTIVE_TTL_S:
+            return False
+        return str(item.get("fingerprint") or "") == _content_fingerprint(content)
+
+    def _mark_recent_proactive(self, chat_id: str, content: str) -> None:
+        self._recent_proactive[chat_id] = {
+            "fingerprint": _content_fingerprint(content),
+            "sent_at": time.time(),
+        }
+        self._pending_proactive.pop(chat_id, None)
+        self._save_state()
+
+    async def _flush_pending_proactive(self, chat_id: str) -> None:
+        item = self._pending_proactive.get(chat_id)
+        if not item:
+            return
+        content = str(item.get("content") or "").strip()
+        ctx_token = self._context_tokens.get(chat_id, "")
+        if not content or not ctx_token:
+            return
+        self.logger.info("WeChat flushing pending proactive to %s", chat_id)
+        try:
+            for chunk in split_message(content, WEIXIN_MAX_MESSAGE_LEN):
+                await self._send_text(chat_id, chunk, ctx_token)
+            self._mark_recent_proactive(chat_id, content)
+            self.logger.info("WeChat pending proactive delivered to %s", chat_id)
+        except Exception:
+            self.logger.exception(
+                "WeChat failed to flush pending proactive to %s; will keep queued",
+                chat_id,
+            )
 
     # ------------------------------------------------------------------
     # HTTP helpers  (matches api.ts buildHeaders / apiFetch)
@@ -727,6 +863,9 @@ class WeixinChannel(BaseChannel):
             self._context_tokens[from_user_id] = ctx_token
             self._context_token_at[from_user_id] = time.time()
             self._save_state()
+            # Deliver any proactive messages that failed while the token was dead.
+            with suppress(Exception):
+                await self._flush_pending_proactive(from_user_id)
 
         # Parse item_list (WeixinMessage.item_list — types.ts:161)
         content_parts: list[str] = []
@@ -1043,28 +1182,29 @@ class WeixinChannel(BaseChannel):
         return ""
 
     async def _refresh_context_token_if_stale(
-        self, chat_id: str, context_token: str
+        self, chat_id: str, context_token: str, *, force: bool = False
     ) -> str:
         """Return a fresh context_token if the cached one is too old.
 
         iLink context_token expires server-side after a short idle period
-        (empirically ~90s). Proactively refreshing before sending prevents
-        silent message loss on long agent turns or cron pushes.
+        (empirically ~90s for long agent turns; proactive cron may be hours
+        old). Proactively refreshing before sending prevents prepare-failed.
         """
         if not context_token:
             return context_token
 
         now = time.time()
         cached_at = self._context_token_at.get(chat_id, 0)
-        age = now - cached_at
+        age = now - cached_at if cached_at else float("inf")
 
-        if age < CONTEXT_TOKEN_MAX_AGE_S:
+        if not force and age < CONTEXT_TOKEN_MAX_AGE_S:
             return context_token
 
-        self.logger.debug(
-            "WeChat context_token for {} is {:.0f}s old; refreshing via getconfig",
+        self.logger.info(
+            "WeChat context_token for %s is %.0fs old%s; refreshing via getconfig",
             chat_id,
-            age,
+            age if age != float("inf") else -1,
+            " (forced)" if force else "",
         )
 
         body: dict[str, Any] = {
@@ -1080,26 +1220,38 @@ class WeixinChannel(BaseChannel):
 
         if data.get("ret", 0) != 0:
             self.logger.warning(
-                "WeChat getconfig returned ret={} for {}: {}",
+                "WeChat getconfig returned ret=%s for %s: %s",
                 data.get("ret"),
                 chat_id,
                 data.get("errmsg", ""),
             )
             return context_token
 
-        new_token = str(data.get("context_token", "") or "")
-        if new_token and new_token != context_token:
-            self.logger.info(
-                "WeChat context_token refreshed for {} (age {:.0f}s -> fresh)",
+        new_token = str(data.get("context_token", "") or "").strip()
+        if not new_token:
+            # getconfig often returns only typing_ticket when the conversation
+            # context is already dead — do NOT bump timestamp or pretend refresh worked.
+            self.logger.warning(
+                "WeChat getconfig returned no context_token for %s (token likely dead; need inbound)",
                 chat_id,
-                age,
             )
-            self._context_tokens[chat_id] = new_token
-            self._context_token_at[chat_id] = now
-            self._save_state()
-            return new_token
+            return "" if force else context_token
 
-        return context_token
+        self._context_tokens[chat_id] = new_token
+        self._context_token_at[chat_id] = now
+        self._save_state()
+        if new_token != context_token:
+            self.logger.info(
+                "WeChat context_token refreshed for %s (age %.0fs -> fresh)",
+                chat_id,
+                age if age != float("inf") else -1,
+            )
+        else:
+            self.logger.info(
+                "WeChat context_token revalidated for %s via getconfig",
+                chat_id,
+            )
+        return new_token
 
     async def _flush_tool_hints(self, chat_id: str) -> None:
         """Send any buffered tool hints for *chat_id* as a single message.
@@ -1204,8 +1356,15 @@ class WeixinChannel(BaseChannel):
             await self._stop_typing(msg.chat_id, clear_remote=True)
 
         ctx_token = self._context_tokens.get(msg.chat_id, "")
-        ctx_token = await self._refresh_context_token_if_stale(msg.chat_id, ctx_token)
+        force_refresh = bool((msg.metadata or {}).get("proactive"))
+        ctx_token = await self._refresh_context_token_if_stale(
+            msg.chat_id, ctx_token, force=force_refresh
+        )
         if not ctx_token:
+            if force_refresh:
+                self._context_tokens.pop(msg.chat_id, None)
+                self._context_token_at.pop(msg.chat_id, None)
+                self._save_state()
             raise RuntimeError(
                 f"WeChat context_token missing for chat_id={msg.chat_id}, cannot send"
             )
@@ -1278,7 +1437,29 @@ class WeixinChannel(BaseChannel):
 
             chunks = split_message(content, WEIXIN_MAX_MESSAGE_LEN)
             for chunk in chunks:
-                await self._send_text(msg.chat_id, chunk, ctx_token)
+                try:
+                    await self._send_text(msg.chat_id, chunk, ctx_token)
+                except RuntimeError as exc:
+                    if not _is_context_token_error(exc):
+                        raise
+                    self.logger.warning(
+                        "WeChat prepare failed for %s; force-refreshing context_token and retrying",
+                        msg.chat_id,
+                    )
+                    self._context_token_at.pop(msg.chat_id, None)
+                    refreshed = await self._refresh_context_token_if_stale(
+                        msg.chat_id, ctx_token, force=True
+                    )
+                    if not refreshed:
+                        # Token is dead; drop cache so notify can queue + wait for inbound.
+                        self._context_tokens.pop(msg.chat_id, None)
+                        self._context_token_at.pop(msg.chat_id, None)
+                        self._save_state()
+                        raise
+                    ctx_token = refreshed
+                    await self._send_text(msg.chat_id, chunk, ctx_token)
+            if force_refresh and content:
+                self._mark_recent_proactive(msg.chat_id, content)
         except Exception:
             self.logger.exception("Error sending message")
             raise

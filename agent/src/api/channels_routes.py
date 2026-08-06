@@ -194,11 +194,28 @@ def register_channels_routes(
         sent: list[str] = []
         skipped: list[dict[str, str]] = []
         errors: list[dict[str, str]] = []
+        queued: list[str] = []
 
         ctx_map = getattr(adapter, "_context_tokens", None)
+        already_sent = getattr(adapter, "already_sent_proactive", None)
+        queue_fn = getattr(adapter, "queue_proactive", None)
+
         for chat_id in uniq:
+            if callable(already_sent) and already_sent(chat_id, content):
+                sent.append(chat_id)
+                continue
             if isinstance(ctx_map, dict) and not ctx_map.get(chat_id):
-                skipped.append({"chat_id": chat_id, "reason": "missing_context_token"})
+                if callable(queue_fn):
+                    queue_fn(chat_id, content, source="channels_notify")
+                    queued.append(chat_id)
+                    skipped.append(
+                        {
+                            "chat_id": chat_id,
+                            "reason": "missing_context_token_queued",
+                        }
+                    )
+                else:
+                    skipped.append({"chat_id": chat_id, "reason": "missing_context_token"})
                 continue
             try:
                 await adapter.send(
@@ -211,7 +228,16 @@ def register_channels_routes(
                 )
                 sent.append(chat_id)
             except Exception as exc:  # noqa: BLE001
-                errors.append({"chat_id": chat_id, "error": str(exc)})
+                err_text = str(exc)
+                token_dead = (
+                    "prepare failed" in err_text.lower()
+                    or "ret=-2" in err_text.lower()
+                    or "context_token" in err_text.lower()
+                )
+                if token_dead and callable(queue_fn):
+                    queue_fn(chat_id, content, source="channels_notify")
+                    queued.append(chat_id)
+                errors.append({"chat_id": chat_id, "error": err_text})
 
         return {
             "ok": bool(sent) and not errors,
@@ -220,7 +246,9 @@ def register_channels_routes(
             "sent": sent,
             "skipped": skipped,
             "errors": errors,
+            "queued": queued,
             "count_sent": len(sent),
             "count_skipped": len(skipped),
             "count_errors": len(errors),
+            "count_queued": len(queued),
         }
