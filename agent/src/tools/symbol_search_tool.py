@@ -8,7 +8,7 @@ hits a provider un-throttled and never re-implements transport plumbing:
   Hong Kong (.HK) and U.S. (.US) listings, each carrying a fully-qualified
   ``secid`` already in ``<market>.<code>`` form.
 * :mod:`backtest.loaders.yahoo_client` — Yahoo's v1 search endpoint matches
-  global tickers/company names (US, HK, crypto, indices, FX, ...).
+  global tickers/company names (US, HK, Canada, crypto, indices, FX, ...).
 * :mod:`backtest.loaders.sec_edgar_client` — the SEC company-tickers table
   enriches a resolved U.S. equity ticker with its zero-padded CIK.
 
@@ -73,7 +73,8 @@ class SymbolSearchTool(BaseTool):
     description = (
         "Resolve a company name or ticker fragment to candidate trading symbols "
         "with their market, in the project's symbol convention (A-shares "
-        "600519.SH, Hong Kong 00700.HK, U.S. AAPL.US, plus crypto/index/FX from "
+        "600519.SH, Hong Kong 00700.HK, U.S. AAPL.US, Canada TD.TO/PNG.V, plus "
+        "crypto/index/FX from "
         "Yahoo). Searches Eastmoney (China/HK/US names and tickers) and Yahoo "
         "(global) and, for U.S. equities, attaches the SEC CIK. Use this to turn "
         "an ambiguous name into a concrete symbol before calling get_market_data "
@@ -288,8 +289,9 @@ def _search_yahoo(query: str) -> tuple[List[Dict[str, Any]], str]:
 def _yahoo_candidate(quote: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Map one Yahoo search quote to a normalized candidate, or ``None``.
 
-    Yahoo carries US tickers bare and HK tickers as ``0700.HK``. We translate
-    those into the project convention (``AAPL.US`` / ``00700.HK``) and leave
+    Yahoo carries US tickers bare, HK tickers as ``0700.HK``, and Canadian
+    listings with ``.TO`` / ``.V`` suffixes. We translate those into the project
+    convention (``AAPL.US`` / ``00700.HK`` / ``TD.TO`` / ``PNG.V``) and leave
     other instruments (crypto, indices, FX) on their native Yahoo symbol.
 
     Args:
@@ -319,7 +321,8 @@ def _from_yahoo_symbol(raw_symbol: str, quote: Dict[str, Any]) -> tuple[str, str
     """Translate a Yahoo symbol into the project convention + market label.
 
     Args:
-        raw_symbol: The Yahoo-side symbol (e.g. ``AAPL``, ``0700.HK``, ``BTC-USD``).
+        raw_symbol: The Yahoo-side symbol (e.g. ``AAPL``, ``0700.HK``,
+            ``TD.TO``, ``PNG.V``, or ``BTC-USD``).
         quote: The full Yahoo quote, used to distinguish a bare US equity from a
             crypto/index instrument via ``quoteType``.
 
@@ -330,6 +333,8 @@ def _from_yahoo_symbol(raw_symbol: str, quote: Dict[str, Any]) -> tuple[str, str
     if upper.endswith(".HK"):
         base = raw_symbol[: -len(".HK")].lstrip("0") or "0"
         return f"{base.zfill(5)}.HK", "hk"
+    if upper.endswith((".TO", ".V")):
+        return upper, "ca"
     quote_type = str(quote.get("quoteType") or "").strip().upper()
     if quote_type == "EQUITY" and "." not in raw_symbol and "-" not in raw_symbol:
         return f"{upper}.US", "us"

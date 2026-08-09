@@ -12,7 +12,8 @@ What this module does
 ---------------------
 * Scans every value in ``user_vars`` for tokens that match one of the
   data-source-suffixed symbol shapes the loaders already understand
-  (``NVDA.US``, ``700.HK``, ``600519.SH``, ``BTC-USDT``, etc.).
+  (``NVDA.US``, ``700.HK``, ``TD.TO``, ``PNG.V``, ``600519.SH``,
+  ``BTC-USDT``, etc.).
 * Pulls the last ``DEFAULT_WINDOW_DAYS`` of OHLCV for each detected
   symbol via ``backtest.loaders.registry.resolve_loader`` with
   ``source="auto"``. Failures (delisted ticker, network blip) are
@@ -78,6 +79,7 @@ _SYMBOL_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\b[A-Z]{1,5}\.US\b"),
     re.compile(r"\b\d{3,5}\.HK\b"),
     re.compile(r"\b\d{6}\.(?:SZ|SH|BJ)\b"),
+    re.compile(r"\b[A-Z0-9&.-]+\.(?:TO|V)\b"),
     re.compile(r"\b[A-Z]{2,6}-USDT\b"),
 )
 
@@ -93,7 +95,7 @@ _BARE_US_TICKER_PATTERN = re.compile(r"(?<![\w.])[A-Z]{2,5}(?!\w)(?!\.\w)")
 _BARE_TICKER_STOPWORDS = frozenset({
     # geography / venues / index & data providers
     "US", "USA", "UK", "EU", "HK", "CN", "JP", "NYSE", "AMEX", "SSE", "SZSE",
-    "HKEX", "SPX", "NDX", "DJI", "DJIA", "HSI", "CSI", "FTSE", "MSCI", "VIX",
+    "HKEX", "TSX", "TSXV", "SPX", "NDX", "DJI", "DJIA", "HSI", "CSI", "FTSE", "MSCI", "VIX",
     # instruments / structures
     "ETF", "ETN", "ADR", "IPO", "REIT", "BOND", "SWAP", "PERP",
     # macro / institutions

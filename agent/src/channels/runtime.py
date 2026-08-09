@@ -161,7 +161,11 @@ class ChannelRuntime:
                                 "Not authorized: pairing management is restricted to "
                                 "configured operators."
                             ),
-                            metadata={PAIRING_COMMAND_META_KEY: True, "unauthorized": True},
+                            metadata={
+                                PAIRING_COMMAND_META_KEY: True,
+                                "unauthorized": True,
+                                "message_id": msg.metadata.get("message_id"),
+                            },
                         )
                     )
                     return
@@ -176,7 +180,10 @@ class ChannelRuntime:
                         channel=msg.channel,
                         chat_id=msg.chat_id,
                         content=reply,
-                        metadata={PAIRING_COMMAND_META_KEY: True},
+                        metadata={
+                            PAIRING_COMMAND_META_KEY: True,
+                            "message_id": msg.metadata.get("message_id"),
+                        },
                     )
                 )
                 return
@@ -192,7 +199,11 @@ class ChannelRuntime:
                         channel=msg.channel,
                         chat_id=msg.chat_id,
                         content=reply,
-                        metadata={"_channel_runtime": True, "session_reset": True},
+                        metadata={
+                            "_channel_runtime": True,
+                            "session_reset": True,
+                            "message_id": msg.metadata.get("message_id"),
+                        },
                     )
                 )
                 return
@@ -214,6 +225,11 @@ class ChannelRuntime:
                         "_channel_runtime": True,
                         "attempt_id": attempt_id,
                         "session_id": session_id,
+                        # QQ (and other platforms) need the originating message id
+                        # to reply as a passive message; without it, replies are
+                        # treated as active messages and rejected for
+                        # non-privileged bots.
+                        "message_id": msg.metadata.get("message_id"),
                     },
                 )
             )
@@ -231,7 +247,11 @@ class ChannelRuntime:
                         "Still working on your previous message — send this again "
                         "once I reply, or use the reset command to start over."
                     ),
-                    metadata={"_channel_runtime": True, "busy": True},
+                    metadata={
+                        "_channel_runtime": True,
+                        "busy": True,
+                        "message_id": msg.metadata.get("message_id"),
+                    },
                 )
             )
         except Exception as exc:  # noqa: BLE001 - channel errors must surface to users
@@ -241,7 +261,11 @@ class ChannelRuntime:
                     channel=msg.channel,
                     chat_id=msg.chat_id,
                     content=f"Channel runtime error: {type(exc).__name__}: {exc}",
-                    metadata={"_channel_runtime": True, "error": True},
+                    metadata={
+                        "_channel_runtime": True,
+                        "error": True,
+                        "message_id": msg.metadata.get("message_id"),
+                    },
                 )
             )
 

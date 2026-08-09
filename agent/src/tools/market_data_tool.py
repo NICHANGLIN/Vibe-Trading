@@ -23,7 +23,10 @@ class MarketDataTool(BaseTool):
             "codes": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": 'Symbols such as ["AAPL.US"], ["700.HK"], ["BTC-USDT"].',
+                "description": (
+                    'Symbols such as ["AAPL.US"], ["700.HK"], ["TD.TO"], '
+                    '["PNG.V"], or ["BTC-USDT"].'
+                ),
             },
             "start_date": {
                 "type": "string",
@@ -61,7 +64,8 @@ class MarketDataTool(BaseTool):
                     "Data source. 'auto' detects from symbol format with fallback. "
                     "Use 'longbridge' explicitly for US/HK OHLCV through the "
                     "Longbridge OpenAPI (requires Longbridge credentials). "
-                    "Free, no key: yfinance/yahoo (US/HK equities), okx/ccxt "
+                    "Free, no key: yfinance/yahoo (US/HK/Canada equities; "
+                    "Canada uses .TO/.V), okx/ccxt "
                     "(crypto), baostock/tencent/eastmoney/sina/akshare/mootdx "
                     "(China A-shares), stooq (global EOD), pykrx (Korea KRX daily "
                     "bars for <CODE>.KS / <CODE>.KQ; needs the optional pykrx "

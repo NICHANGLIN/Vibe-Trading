@@ -72,6 +72,18 @@ def _yahoo_quotes() -> list:
             "exchange": "CCC",
             "quoteType": "CRYPTOCURRENCY",
         },
+        {
+            "symbol": "TD.TO",
+            "shortname": "Toronto-Dominion Bank",
+            "exchange": "TOR",
+            "quoteType": "EQUITY",
+        },
+        {
+            "symbol": "PNG.V",
+            "shortname": "Kraken Robotics Inc.",
+            "exchange": "VAN",
+            "quoteType": "EQUITY",
+        },
         {"symbol": "", "shortname": "no symbol"},  # dropped
     ]
 
@@ -101,6 +113,9 @@ class TestSymbolSearchSuccess:
         assert data["sources"]["sec_edgar"] == "ok"
 
         by_symbol = {c["symbol"]: c for c in data["candidates"]}
+
+        assert by_symbol["TD.TO"]["market"] == "ca"
+        assert by_symbol["PNG.V"]["market"] == "ca"
 
         # A-share secid -> 600519.SH, market cn.
         assert by_symbol["600519.SH"]["market"] == "cn"

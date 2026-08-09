@@ -425,6 +425,7 @@ def _provider_key_env(provider: str | None) -> str | None:
         "spark": "SPARK_API_KEY",
         "iflytek": "SPARK_API_KEY",
         "zai": "ZAI_API_KEY",
+        "modelscope": "MODELSCOPE_API_KEY",
     }.get((provider or "").lower())
 
 
@@ -449,6 +450,7 @@ def _provider_base_env(provider: str | None) -> str | None:
         "spark": "SPARK_BASE_URL",
         "iflytek": "SPARK_BASE_URL",
         "zai": "ZAI_BASE_URL",
+        "modelscope": "MODELSCOPE_BASE_URL",
         "ollama": "OLLAMA_BASE_URL",
     }.get((provider or "").lower())
 
@@ -4714,6 +4716,10 @@ def _build_parser() -> argparse.ArgumentParser:
     chat_parser = subparsers.add_parser("chat", help="Interactive chat mode")
     chat_parser.add_argument("--max-iter", dest="chat_max_iter", type=int, default=50, help="Maximum agent iterations")
 
+    subparsers.add_parser(
+        "update", help="Check for and install the latest vibe-trading-ai release from PyPI"
+    )
+
     subparsers.add_parser("init", help="Interactive setup: create ~/.vibe-trading/.env")
 
     # Cross-platform frontend setup. See cmd_setup() for details.
@@ -4866,6 +4872,10 @@ def _build_parser() -> argparse.ArgumentParser:
     from src.hypotheses.cli_handlers import add_subparser as _add_hypothesis_subparser
     _add_hypothesis_subparser(subparsers)
 
+    # Scheduled-research playbook templates (list / show / create)
+    from cli.commands.research_playbook import add_subparser as _add_playbook_subparser
+    _add_playbook_subparser(subparsers)
+
     return parser
 
 
@@ -4947,6 +4957,16 @@ _PROVIDER_CHOICES: list[dict[str, str | None]] = [
         "model": "deepseek-ai/DeepSeek-V3.1-Terminus",
         "key_prefix": "sk-",
         "key_placeholder": "sk-...",
+    },
+    {
+        "label": "ModelScope",
+        "provider": "modelscope",
+        "key_env": "MODELSCOPE_API_KEY",
+        "base_env": "MODELSCOPE_BASE_URL",
+        "base_url": "https://api-inference.modelscope.cn/v1",
+        "model": "Qwen/Qwen3.5-27B",
+        "key_prefix": None,
+        "key_placeholder": "api-key...",
     },
     {
         "label": "NVIDIA NIM",
@@ -5735,12 +5755,19 @@ def main(argv: list[str] | None = None) -> int:
         return _coerce_exit_code(cmd_show(args.show))
     if args.command == "chat":
         return _coerce_exit_code(cmd_interactive(args.chat_max_iter))
+    if args.command == "update":
+        from cli.commands.update import cmd_update
+
+        return _coerce_exit_code(cmd_update())
     if args.command == "alpha":
         from src.factors.cli_handlers import dispatch as _alpha_dispatch
         return _coerce_exit_code(_alpha_dispatch(args))
     if args.command == "hypothesis":
         from src.hypotheses.cli_handlers import dispatch as _hyp_dispatch
         return _coerce_exit_code(_hyp_dispatch(args))
+    if args.command == "playbook":
+        from cli.commands.research_playbook import dispatch as _playbook_dispatch
+        return _coerce_exit_code(_playbook_dispatch(args))
     if args.command == "connector":
         return _coerce_exit_code(_dispatch_connector(args))
     if args.command == "memory":
